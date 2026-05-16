@@ -1,0 +1,681 @@
+behaviour("dvRadar")
+
+local RadarType = {
+    MISSILE = 1,
+    AIR = 2,
+    GROUND = 3,
+    BOAT = 4
+}
+
+function dvRadar:Start()
+
+    self.vehicle =
+        self.targets.vehicle.GetComponent(Vehicle)
+
+    self.rtScreen =
+        self.targets.screen.GetComponent(RectTransform)
+
+    self.dc =
+        self.targets.dataContainer.GetComponent(DataContainer)
+
+    self.textPool =
+        self.targets.textPool.GetComponentsInChildren(Text)
+
+    ----------------------------------------------------
+    -- UPDATE
+    ----------------------------------------------------
+
+    self.updateTimer = 0
+
+    ----------------------------------------------------
+    -- RADAR SETTINGS
+    ----------------------------------------------------
+
+    self.updateInterval =
+        self.dc.GetFloat("RadarUpdateTime")
+
+    self.radarMaxRange =
+        self.dc.GetFloat("RadarEffectDistance")
+
+    self.radarMinRange =
+        self.dc.GetFloat("RadarMinDistance")
+
+    self.radarZoomSpeed =
+        self.dc.GetFloat("RadarZoomSpeed")
+
+    self.radarZoomMode =
+        self.dc.GetInt("RadarZoomMode")
+
+    self.radarRange =
+        self.radarMaxRange
+
+    ----------------------------------------------------
+    -- LIMITS
+    ----------------------------------------------------
+
+    self.maxGround =
+        self.dc.GetInt("MaxGroundVehicles")
+
+    self.maxBoats =
+        self.dc.GetInt("MaxBoats")
+
+    self.maxFriendlyAir =
+        self.dc.GetInt("MaxFriendlyAir")
+
+    ----------------------------------------------------
+    -- COLORS
+    ----------------------------------------------------
+
+    self.enemyColor =
+        self.dc.GetColor("RadarEnemyColor")
+
+    self.friendlyColor =
+        self.dc.GetColor("RadarAlliedColor")
+
+    ----------------------------------------------------
+    -- SYMBOLS
+    ----------------------------------------------------
+
+    self.enemyAirSymbol =
+        self.dc.GetString("RadarEnemyAirSymbol")
+
+    self.friendlyAirSymbol =
+        self.dc.GetString("RadarFriendlyAirSymbol")
+
+    self.enemyGroundSymbol =
+        self.dc.GetString("RadarEnemyGroundSymbol")
+
+    self.friendlyGroundSymbol =
+        self.dc.GetString("RadarFriendlyGroundSymbol")
+
+    self.enemyBoatSymbol =
+        self.dc.GetString("RadarEnemyBoatSymbol")
+
+    self.friendlyBoatSymbol =
+        self.dc.GetString("RadarFriendlyBoatSymbol")
+
+    self.missileSymbol =
+        self.dc.GetString("RadarMissileSymbol")
+
+    ----------------------------------------------------
+    -- TARGET TABLE
+    ----------------------------------------------------
+
+    self.detectedTargets = {}
+
+end
+
+----------------------------------------------------
+-- UPDATE
+----------------------------------------------------
+
+function dvRadar:Update()
+
+    if not self.vehicle.playerIsInside then
+
+        self:ResetPool()
+
+        return
+
+    end
+
+    self.updateTimer =
+        self.updateTimer + Time.deltaTime
+
+    if self.updateTimer >= self.updateInterval then
+
+        self.updateTimer = 0
+
+        self:UpdateRadarZoom()
+
+        self:ResetPool()
+
+        self:ScanTargets()
+
+        self:SortTargets()
+
+        self:DrawTargets()
+
+    end
+
+end
+
+----------------------------------------------------
+-- RADAR ZOOM
+----------------------------------------------------
+
+function dvRadar:UpdateRadarZoom()
+
+    local missiles =
+        self.vehicle.GetTrackingMissiles()
+
+    local targetRange =
+        self.radarMaxRange
+
+    ------------------------------------------------
+    -- MODE 0
+    -- DEFAULT MAX
+    -- MISSILE SHRINK
+    ------------------------------------------------
+
+    if self.radarZoomMode == 0 then
+
+        targetRange =
+            self.radarMaxRange
+
+        if #missiles > 0 then
+
+            local nearest =
+                self.radarMaxRange
+
+            local myPos =
+                self.vehicle.transform.position
+
+            for i = 1, #missiles do
+
+                local missile =
+                    missiles[i]
+
+                local dist =
+                    Vector3.Distance(
+                        myPos,
+                        missile.transform.position
+                    )
+
+                if dist < nearest then
+                    nearest = dist
+                end
+
+            end
+
+            targetRange =
+                nearest * 1.25
+
+            targetRange =
+                Mathf.Clamp(
+                    targetRange,
+                    self.radarMinRange,
+                    self.radarMaxRange
+                )
+
+        end
+
+    ------------------------------------------------
+    -- MODE 1
+    -- DEFAULT MIN
+    -- MISSILE EXPAND
+    ------------------------------------------------
+
+    elseif self.radarZoomMode == 1 then
+
+        targetRange =
+            self.radarMinRange
+
+        if #missiles > 0 then
+
+            local farthest = 0
+
+            local myPos =
+                self.vehicle.transform.position
+
+            for i = 1, #missiles do
+
+                local missile =
+                    missiles[i]
+
+                local dist =
+                    Vector3.Distance(
+                        myPos,
+                        missile.transform.position
+                    )
+
+                if dist > farthest then
+                    farthest = dist
+                end
+
+            end
+
+            targetRange =
+                farthest * 1.25
+
+            targetRange =
+                Mathf.Clamp(
+                    targetRange,
+                    self.radarMinRange,
+                    self.radarMaxRange
+                )
+
+        end
+
+    end
+
+    ------------------------------------------------
+    -- SMOOTH
+    ------------------------------------------------
+
+    self.radarRange =
+        Mathf.Lerp(
+            self.radarRange,
+            targetRange,
+            Time.deltaTime *
+            self.radarZoomSpeed
+        )
+
+end
+
+----------------------------------------------------
+-- RESET
+----------------------------------------------------
+
+function dvRadar:ResetPool()
+
+    for i = 1, #self.textPool do
+
+        local txt = self.textPool[i]
+
+        txt.rectTransform.localScale =
+            Vector3.zero
+
+    end
+
+end
+
+----------------------------------------------------
+-- SCAN TARGETS
+----------------------------------------------------
+
+function dvRadar:ScanTargets()
+
+    self.detectedTargets = {}
+
+    local myPos =
+        self.vehicle.transform.position
+
+    local vehicles =
+        ActorManager.VehiclesInRange(
+            myPos,
+            self.radarMaxRange
+        )
+
+    local groundCount = 0
+    local boatCount = 0
+    local friendlyAirCount = 0
+
+    for i = 1, #vehicles do
+
+        local v = vehicles[i]
+
+        if v ~= self.vehicle then
+
+            if v.hasDriver and not v.isTurret then
+
+                local entry = {
+                    vehicle = v,
+                    distance = Vector3.Distance(
+                        myPos,
+                        v.transform.position
+                    )
+                }
+
+                ------------------------------------------------
+                -- AIR
+                ------------------------------------------------
+
+                if v.isAirplane or v.isHelicopter then
+
+                    entry.type = RadarType.AIR
+
+                    if v.team == self.vehicle.team then
+
+                        if friendlyAirCount < self.maxFriendlyAir then
+
+                            table.insert(
+                                self.detectedTargets,
+                                entry
+                            )
+
+                            friendlyAirCount =
+                                friendlyAirCount + 1
+
+                        end
+
+                    else
+
+                        table.insert(
+                            self.detectedTargets,
+                            entry
+                        )
+
+                    end
+
+                ------------------------------------------------
+                -- BOAT
+                ------------------------------------------------
+
+                elseif v.isBoat then
+
+                    if boatCount < self.maxBoats then
+
+                        entry.type = RadarType.BOAT
+
+                        table.insert(
+                            self.detectedTargets,
+                            entry
+                        )
+
+                        boatCount = boatCount + 1
+
+                    end
+
+                ------------------------------------------------
+                -- GROUND
+                ------------------------------------------------
+
+                else
+
+                    if groundCount < self.maxGround then
+
+                        entry.type = RadarType.GROUND
+
+                        table.insert(
+                            self.detectedTargets,
+                            entry
+                        )
+
+                        groundCount =
+                            groundCount + 1
+
+                    end
+
+                end
+
+            end
+
+        end
+
+    end
+
+    ----------------------------------------------------
+    -- MISSILES
+    ----------------------------------------------------
+
+    local missiles =
+        self.vehicle.GetTrackingMissiles()
+
+    for i = 1, #missiles do
+
+        local missile = missiles[i]
+
+        local entry = {
+            vehicle = missile,
+            type = RadarType.MISSILE,
+            distance = Vector3.Distance(
+                myPos,
+                missile.transform.position
+            )
+        }
+
+        table.insert(
+            self.detectedTargets,
+            entry
+        )
+
+    end
+
+end
+
+----------------------------------------------------
+-- SORT TARGETS
+----------------------------------------------------
+
+function dvRadar:SortTargets()
+
+    table.sort(
+        self.detectedTargets,
+
+        function(a, b)
+
+            return a.distance < b.distance
+
+        end
+    )
+
+end
+
+----------------------------------------------------
+-- DRAW ALL TARGETS
+----------------------------------------------------
+
+function dvRadar:DrawTargets()
+
+    local poolIndex = 1
+
+    for i = 1, #self.detectedTargets do
+
+        if poolIndex > #self.textPool then
+            return
+        end
+
+        local entry =
+            self.detectedTargets[i]
+
+        local txt =
+            self.textPool[poolIndex]
+
+        self:DrawTarget(txt, entry)
+
+        poolIndex = poolIndex + 1
+
+    end
+
+end
+
+----------------------------------------------------
+-- DRAW SINGLE TARGET
+----------------------------------------------------
+
+function dvRadar:DrawTarget(txt, entry)
+
+    local target =
+        entry.vehicle
+
+    local myPos =
+        self.vehicle.transform.position
+
+    local targetPos =
+        target.transform.position
+
+    ----------------------------------------------------
+    -- FLAT DELTA
+    ----------------------------------------------------
+
+    local delta =
+        targetPos - myPos
+
+    delta.y = 0
+
+    ----------------------------------------------------
+    -- STABLE RADAR AXIS
+    ----------------------------------------------------
+
+    local yawForward =
+        Vector3(
+            self.vehicle.transform.forward.x,
+            0,
+            self.vehicle.transform.forward.z
+        ).normalized
+
+    local yawRight =
+        Vector3(
+            yawForward.z,
+            0,
+            -yawForward.x
+        )
+
+    ----------------------------------------------------
+    -- RADAR SPACE
+    ----------------------------------------------------
+
+    local radarX =
+        Vector3.Dot(delta, yawRight)
+
+    local radarY =
+        Vector3.Dot(delta, yawForward)
+
+    radarX =
+        radarX / self.radarRange
+
+    radarY =
+        radarY / self.radarRange
+
+    ----------------------------------------------------
+    -- EDGE LIMIT
+    ----------------------------------------------------
+
+    local magnitude =
+        Mathf.Sqrt(
+            radarX * radarX +
+            radarY * radarY
+        )
+
+    if magnitude > 1 then
+
+        radarX = radarX / magnitude
+        radarY = radarY / magnitude
+
+    end
+
+    ----------------------------------------------------
+    -- UI POSITION
+    ----------------------------------------------------
+
+    local screenX =
+        radarX *
+        self.rtScreen.sizeDelta.x *
+        0.5
+
+    local screenY =
+        radarY *
+        self.rtScreen.sizeDelta.y *
+        0.5
+
+    txt.rectTransform.localPosition =
+        Vector3(screenX, screenY, 0)
+
+    ----------------------------------------------------
+    -- MISSILE
+    ----------------------------------------------------
+
+    if entry.type == RadarType.MISSILE then
+
+        txt.color =
+            self.enemyColor
+
+        txt.text =
+            self.missileSymbol
+
+        local angle =
+            math.atan2(
+                radarY,
+                radarX
+            ) * Mathf.Rad2Deg
+
+        txt.rectTransform.localRotation =
+            Quaternion.Euler(
+                0,
+                0,
+                angle - 90
+            )
+
+    ----------------------------------------------------
+    -- AIR
+    ----------------------------------------------------
+
+    elseif entry.type == RadarType.AIR then
+
+        if target.team == self.vehicle.team then
+
+            txt.color =
+                self.friendlyColor
+
+            txt.text =
+                self.friendlyAirSymbol
+
+        else
+
+            txt.color =
+                self.enemyColor
+
+            txt.text =
+                self.enemyAirSymbol
+
+        end
+
+        txt.rectTransform.localRotation =
+            Quaternion.identity
+
+    ----------------------------------------------------
+    -- GROUND
+    ----------------------------------------------------
+
+    elseif entry.type == RadarType.GROUND then
+
+        if target.team == self.vehicle.team then
+
+            txt.color =
+                self.friendlyColor
+
+            txt.text =
+                self.friendlyGroundSymbol
+
+        else
+
+            txt.color =
+                self.enemyColor
+
+            txt.text =
+                self.enemyGroundSymbol
+
+        end
+
+        txt.rectTransform.localRotation =
+            Quaternion.identity
+
+    ----------------------------------------------------
+    -- BOAT
+    ----------------------------------------------------
+
+    elseif entry.type == RadarType.BOAT then
+
+        if target.team == self.vehicle.team then
+
+            txt.color =
+                self.friendlyColor
+
+            txt.text =
+                self.friendlyBoatSymbol
+
+        else
+
+            txt.color =
+                self.enemyColor
+
+            txt.text =
+                self.enemyBoatSymbol
+
+        end
+
+        txt.rectTransform.localRotation =
+            Quaternion.identity
+
+    end
+
+    ----------------------------------------------------
+    -- ENABLE
+    ----------------------------------------------------
+
+    txt.rectTransform.localScale =
+        Vector3.one
+
+end
+

@@ -1,0 +1,50 @@
+behaviour("DvDampVelZ") 
+
+function DvDampVelZ:Start()
+    self.animator = self.gameObject:GetComponent(Animator)
+    self.dc = self.gameObject:GetComponent(DataContainer)
+
+    self.dampTime = 7
+    self.decelDampTime = 0.3   -- 减速时用的更小阻尼
+    self.interval = 0.1
+    self.timer = 0.0
+
+    self.lastVelZDamp = 0.0
+end
+
+function DvDampVelZ:Update()
+    self.timer = self.timer + Time.deltaTime
+    if self.timer < self.interval then
+        return
+    end
+
+    if not self.animator then
+        self.timer = 0.0
+        return
+    end
+
+    if self.dc then
+        self.dampTime = self.dc:GetFloat("dampTime", self.dampTime)
+    end
+
+    local velZ = self.animator:GetFloat("velocity z")
+
+    local dt = self.timer
+    self.timer = 0.0
+
+    -- 判断减速
+    local useDamp = self.dampTime
+    if velZ < self.lastVelZDamp then
+        useDamp = self.decelDampTime
+    end
+
+    self.animator:SetFloat(
+        "velocity z damp",
+        velZ,
+        useDamp,
+        dt
+    )
+
+    -- 记录本次结果，供下次判断
+    self.lastVelZDamp = self.animator:GetFloat("velocity z damp")
+end

@@ -1,0 +1,24 @@
+behaviour("DvSpaceFire")
+
+function DvSpaceFire:Start()
+    self.weapon = self.gameObject:GetComponent(Weapon)
+    self.vehicle = self.targets.vehicle:GetComponent(Vehicle)
+end
+
+function DvSpaceFire:Update()
+    if (not self.weapon) or (not self.vehicle) then
+        return
+    end
+
+    if (not self.vehicle.hasDriver) then
+        return
+    end
+    if self.vehicle.driver ~= Player.actor then
+        return
+    end
+
+    -- 按住空格开火（单发就改成 GetKeyDown）
+    if Input.GetKey(KeyCode.Space) then
+        self.weapon:Shoot()
+    end
+end

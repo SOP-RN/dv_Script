@@ -1,0 +1,72 @@
+behaviour("DvSpaceFireMounted")
+
+function DvSpaceFireMounted:Start()
+    self.vehicle = nil
+    if self.targets.vehicle then
+        self.vehicle = self.targets.vehicle:GetComponent(Vehicle)
+    end
+
+    self.w1 = nil
+    if self.targets.mountedWeapon1 then
+        self.w1 = self.targets.mountedWeapon1:GetComponent(MountedWeapon)
+    elseif self.targets.mountedWeapon then
+        self.w1 = self.targets.mountedWeapon:GetComponent(MountedWeapon)
+    end
+
+    self.w2 = nil
+    if self.targets.mountedWeapon2 then
+        self.w2 = self.targets.mountedWeapon2:GetComponent(MountedWeapon)
+    end
+
+    -- 每把武器各自的下一次允许开火时间
+    self.nextFire1 = 0.0
+    self.nextFire2 = 0.0
+end
+
+function DvSpaceFireMounted:Update()
+    if not self.vehicle then return end
+    if (not self.vehicle.hasDriver) or (self.vehicle.driver ~= Player.actor) then return end
+
+    -- Jump = Space
+    if not Input.GetKeyBindButton(KeyBinds.Jump) then return end
+
+    self:TryFireWeapon(self.w1, 1)
+    self:TryFireWeapon(self.w2, 2)
+end
+
+function DvSpaceFireMounted:TryFireWeapon(w, idx)
+    if not w then return end
+
+    local t = Time.time
+
+    -- 使用武器自身 cooldown
+    local cd = w.cooldown or 0.0
+    if cd < 0.0 then cd = 0.0 end
+
+    local nextT = (idx == 1) and self.nextFire1 or self.nextFire2
+    if t < nextT then return end
+
+    -- 过热逻辑
+    if w.applyHeat then
+        if w.isOverheating then return end
+        if w.heat and w.heat >= 1.0 then return end
+    end
+
+    -- 弹药门
+    if (w.hasLoadedAmmo ~= nil) and (not w.hasLoadedAmmo) then
+        return
+    end
+
+    -- kill credit 归玩家
+    w.killCredit = Player.actor
+
+    -- 强制射击
+    w:Shoot(true)
+
+    local newNext = t + cd
+    if idx == 1 then
+        self.nextFire1 = newNext
+    else
+        self.nextFire2 = newNext
+    end
+end

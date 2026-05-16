@@ -1,0 +1,112 @@
+behaviour("DvADS")
+
+function DvADS:Start()
+    self.vehicle = self.gameObject:GetComponent(Vehicle)
+
+    -- 参数：把原来顶部的 local 全部变成实例字段（避免多实例互相污染）
+    self.maxInterceptCount = 6         -- iCount
+    self.cooldownSeconds = 1.0        -- fCoolDown
+    self.updateInterval = 0.2          -- fTimeInternal
+    self.radius = 20.0                -- fRadius
+
+    self.curCount = 0
+    self.inCooldown = false
+    self.enemyTeam = nil
+
+    self.projectiles = {}             -- 存 RocketProjectile
+    self.lastVel = {}                 -- 存上一帧速度（用于判定“卡住/停了/无效”）
+
+    self.timer = 0.0
+
+    -- 关键：保存监听器关系，销毁时要 RemoveListener
+    GameEvents.onProjectileSpawned:AddListener(self, "OnProjectileSpawned")
+end
+
+function DvADS:OnDestroy()
+    if GameEvents and GameEvents.onProjectileSpawned then
+        GameEvents.onProjectileSpawned:RemoveListener(self, "OnProjectileSpawned")
+    end
+end
+
+function DvADS:Update()
+    if not self.vehicle then return end
+    if self.vehicle.isDead then
+        -- 死亡后清理脚本自身（同时会触发 OnDestroy -> RemoveListener）
+        GameObject.Destroy(self.script)
+        return
+    end
+
+    self.timer = self.timer + Time.deltaTime
+    if self.timer < self.updateInterval then return end
+    self.timer = 0.0
+
+    -- 仅在拿到驾驶员后确定“敌方队伍”
+    if self.enemyTeam == nil and self.vehicle.driver ~= nil then
+        local driverTeam = self.vehicle.driver.team
+        self.enemyTeam = (driverTeam == Team.Red) and Team.Blue or Team.Red
+    end
+
+    if not self.inCooldown then
+        self:APS()
+    end
+end
+
+function DvADS:OnProjectileSpawned(projectile)
+    -- 没确定敌方队伍时不工作（避免无意义堆列表）
+    if self.enemyTeam == nil then return end
+
+    -- 只拦截火箭类 + 来自敌方
+    if projectile and projectile.isRocketProjectile and projectile.source and projectile.source.team == self.enemyTeam then
+        table.insert(self.projectiles, projectile)
+        table.insert(self.lastVel, Vector3.zero)
+    end
+end
+
+function DvADS:APS()
+    local pos = self.transform.position
+
+    -- 反向遍历：删除更安全，不会因为 table.remove 造成索引跳跃
+    for i = #self.projectiles, 1, -1 do
+        local p = self.projectiles[i]
+        if p == nil then
+            table.remove(self.projectiles, i)
+            table.remove(self.lastVel, i)
+        else
+            -- 如果速度长期完全不变（或对象异常），就当作无效弹，清掉
+            -- 注意：Vector3 的 == 是值比较；这里保留你原逻辑，但更安全地写在反向循环里
+            if p.velocity == self.lastVel[i] then
+                table.remove(self.projectiles, i)
+                table.remove(self.lastVel, i)
+            else
+                local dist = Vector3.Distance(pos, p.transform.position)
+                if dist < self.radius then
+                    -- 拦截：停止弹体 + 生成爆炸特效
+                    p:Stop(false)
+
+                    if self.explosionPrefab then
+                        local effect = GameObject.Instantiate(self.explosionPrefab)
+                        effect.transform.position = p.transform.position
+                    end
+
+                    self.curCount = self.curCount + 1
+
+                    table.remove(self.projectiles, i)
+                    table.remove(self.lastVel, i)
+
+                    if self.curCount >= self.maxInterceptCount then
+                        self.inCooldown = true
+                        self.script:StartCoroutine("ResetCooldown")
+                    end
+                else
+                    self.lastVel[i] = p.velocity
+                end
+            end
+        end
+    end
+end
+
+function DvADS:ResetCooldown()
+    coroutine.yield(WaitForSeconds(self.cooldownSeconds))
+    self.inCooldown = false
+    self.curCount = 0
+end

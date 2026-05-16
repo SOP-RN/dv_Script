@@ -1,0 +1,59 @@
+behaviour("DvBrakeGate")
+
+function DvBrakeGate:Start()
+    self.animator = self.gameObject:GetComponent(Animator)
+    self.targetObject = self.targets.targetObject
+    self.particles = nil
+    if self.targetObject then
+        self.particles = self.targetObject:GetComponent(ParticleSystem)
+    end
+
+    self.updateInterval = 0.1
+    self.timeSinceLastUpdate = 0.0
+
+    self.minVel = 9.0
+    self.maxVel = 100.0
+    self.dropRateThreshold = 0.35
+
+    self.prevVelZ = nil
+
+    -- 触发节流：避免连续触发把事件系统打爆
+    self.minTriggerGap = 0.1          -- 你可以设成 0.1~0.2
+    self.nextAllowedTriggerTime = 0.0
+end
+
+function DvBrakeGate:Update()
+    if (not self.animator) or (not self.particles) then return end
+
+    self.timeSinceLastUpdate = self.timeSinceLastUpdate + Time.deltaTime
+    if self.timeSinceLastUpdate < self.updateInterval then return end
+
+    local dt = self.timeSinceLastUpdate
+    self.timeSinceLastUpdate = 0.0
+
+    local velZ = self.animator:GetFloat("velocity z")
+    local trigger = false
+
+    if self.prevVelZ ~= nil then
+        if self.prevVelZ >= self.minVel and self.prevVelZ <= self.maxVel then
+            local drop = self.prevVelZ - velZ
+            if drop > 0.0 then
+                local dropRate = drop / dt
+                if dropRate > self.dropRateThreshold then
+                    trigger = true
+                end
+            end
+        end
+    end
+
+    -- 只在“触发事件”时 Play（且做时间节流），不 Stop
+    if trigger then
+        local t = Time.time
+        if t >= self.nextAllowedTriggerTime then
+            self.particles:Play(true)
+            self.nextAllowedTriggerTime = t + self.minTriggerGap
+        end
+    end
+
+    self.prevVelZ = velZ
+end

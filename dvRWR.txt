@@ -1,0 +1,249 @@
+behaviour("dvRWR")
+
+function dvRWR:Start()
+
+    self.vehicle =
+        self.targets.vehicle.GetComponent(Vehicle)
+
+    self.rtScreen =
+        self.targets.screen.GetComponent(RectTransform)
+
+    self.dc =
+        self.targets.dataContainer.GetComponent(DataContainer)
+
+    self.textPool =
+        self.targets.textPool.GetComponentsInChildren(Text)
+
+    ------------------------------------------------
+    -- SETTINGS
+    ------------------------------------------------
+
+    self.updateInterval =
+        self.dc.GetFloat("RadarUpdateTime")
+
+    self.rwrRange =
+        self.dc.GetFloat("RadarEffectDistance")
+
+    self.enemyColor =
+        self.dc.GetColor("RadarEnemyColor")
+
+    self.updateTimer = 0
+
+end
+
+------------------------------------------------
+-- UPDATE
+------------------------------------------------
+
+function dvRWR:Update()
+
+    if not self.vehicle.playerIsInside then
+
+        self:ResetPool()
+
+        return
+
+    end
+
+    self.updateTimer =
+        self.updateTimer + Time.deltaTime
+
+    if self.updateTimer >= self.updateInterval then
+
+        self.updateTimer = 0
+
+        self:ResetPool()
+
+        self:DrawMissiles()
+
+    end
+
+end
+
+------------------------------------------------
+-- RESET
+------------------------------------------------
+
+function dvRWR:ResetPool()
+
+    for i = 1, #self.textPool do
+
+        self.textPool[i].rectTransform.localScale =
+            Vector3.zero
+
+    end
+
+end
+
+------------------------------------------------
+-- DRAW MISSILES
+------------------------------------------------
+
+function dvRWR:DrawMissiles()
+
+    local missiles =
+        self.vehicle.GetTrackingMissiles()
+
+    local myPos =
+        self.vehicle.transform.position
+
+    for i = 1, #missiles do
+
+        if i > #self.textPool then
+            return
+        end
+
+        local missile =
+            missiles[i]
+
+        local txt =
+            self.textPool[i]
+
+        ------------------------------------------------
+        -- FLAT DELTA
+        ------------------------------------------------
+
+        local delta =
+            missile.transform.position - myPos
+
+        delta.y = 0
+
+        ------------------------------------------------
+        -- YAW AXIS
+        ------------------------------------------------
+
+        local yawForward =
+            Vector3(
+                self.vehicle.transform.forward.x,
+                0,
+                self.vehicle.transform.forward.z
+            ).normalized
+
+        local yawRight =
+            Vector3(
+                yawForward.z,
+                0,
+                -yawForward.x
+            )
+
+        ------------------------------------------------
+        -- RADAR SPACE
+        ------------------------------------------------
+
+        local radarX =
+            Vector3.Dot(delta, yawRight)
+
+        local radarY =
+            Vector3.Dot(delta, yawForward)
+
+        local magnitude =
+            Mathf.Sqrt(
+                radarX * radarX +
+                radarY * radarY
+            )
+
+        ------------------------------------------------
+        -- NORMALIZE TO RING
+        ------------------------------------------------
+
+        radarX = radarX / magnitude
+        radarY = radarY / magnitude
+
+        ------------------------------------------------
+        -- UI POSITION
+        ------------------------------------------------
+
+        local screenX =
+            radarX *
+            self.rtScreen.sizeDelta.x *
+            0.45
+
+        local screenY =
+            radarY *
+            self.rtScreen.sizeDelta.y *
+            0.45
+
+        txt.rectTransform.localPosition =
+            Vector3(screenX, screenY, 0)
+
+        ------------------------------------------------
+        -- DISTANCE
+        ------------------------------------------------
+
+        local dist =
+            Vector3.Distance(
+                myPos,
+                missile.transform.position
+            )
+
+        ------------------------------------------------
+        -- BLINK LOGIC
+        ------------------------------------------------
+
+        local visible = true
+
+        ------------------------------------------------
+        -- 1000m
+        ------------------------------------------------
+
+        if dist < 1000 then
+
+            visible =
+                Mathf.Repeat(
+                    Time.time * 4,
+                    1
+                ) > 0.5
+
+        end
+
+        ------------------------------------------------
+        -- 500m
+        ------------------------------------------------
+
+        if dist < 500 then
+
+            visible =
+                Mathf.Repeat(
+                    Time.time * 7,
+                    1
+                ) > 0.5
+
+        end
+
+        ------------------------------------------------
+        -- DISPLAY
+        ------------------------------------------------
+
+        if visible then
+
+            txt.text = "E"
+
+            txt.color =
+                self.enemyColor
+
+            local angle =
+                math.atan2(
+                    radarY,
+                    radarX
+                ) * Mathf.Rad2Deg
+
+            txt.rectTransform.localRotation =
+                Quaternion.Euler(
+                    0,
+                    0,
+                    angle - 90
+                )
+
+            txt.rectTransform.localScale =
+                Vector3.one
+
+        else
+
+            txt.rectTransform.localScale =
+                Vector3.zero
+
+        end
+
+    end
+
+end
