@@ -1,0 +1,51 @@
+behaviour("ReModelsController")
+
+function ReModelsController:Start()
+	self.targetObjs = self.targets.targetObjs
+	
+	self.weapon = self.targets.weapon.GetComponent(Weapon)
+	self.weapon.onFire.AddListener(self, "onFire")
+	
+	self.cooldown = self.weapon.reloadTime
+	self.isCoolDown = false
+
+	self.childObjects = {}
+    self.currentIndex = 1
+	
+	self:CollectChildObjects(self.targetObjs)
+end
+
+function ReModelsController:Update()
+	if self.weapon.isReloading and not self.isCoolDown then
+		self.script.StartCoroutine("ActivesChildObjects")
+	end
+end
+
+function ReModelsController:ActivesChildObjects()
+	self.isCoolDown = true
+	coroutine.yield(WaitForSeconds(self.cooldown))
+	for _, childObj in pairs(self.childObjects) do
+		childObj.SetActive(true)
+	end
+	self.isCoolDown = false
+end
+
+function ReModelsController:onFire()
+	local childObj = self.childObjects[self.currentIndex]
+        
+	if childObj ~= nil then
+		childObj.SetActive(false)
+		self.currentIndex = self.currentIndex + 1
+	   
+		if self.currentIndex > #self.childObjects then
+            self.currentIndex = 1
+        end
+	end
+end
+
+function ReModelsController:CollectChildObjects(parentObj)
+    for i = 1, parentObj.transform.childCount do
+        local child = parentObj.transform.GetChild(i - 1).gameObject
+        table.insert(self.childObjects, child)
+    end
+end

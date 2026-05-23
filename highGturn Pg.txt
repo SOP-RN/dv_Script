@@ -1,0 +1,52 @@
+behaviour("highGturn")
+
+function highGturn:Start()
+    self.dataContainer = self.gameObject.GetComponent(DataContainer)
+    self.vehicle = self.gameObject.GetComponent(Vehicle)
+    self.ADMCurve = self.dataContainer.GetAnimationCurve("ADM")
+    self.DMCurve = self.dataContainer.GetAnimationCurve("DM")
+    self.PDCurve = self.dataContainer.GetAnimationCurve("PD")
+
+    self.transitionSpeed = 5  -- Speed of transition for ease in/out
+    self.currentFactor = 0    -- Transition factor (0 to 1)
+end
+
+function highGturn:Update()
+    self.isHighGTurnActive = Input.GetKey(KeyCode.Space) and self.vehicle.playerIsInside
+end
+
+function highGturn:FixedUpdate()
+    local drag, angularDrag, perpendicularDrag = 0.2, 2, 2
+
+    -- Smooth transition (ease in/out)
+    if self.isHighGTurnActive then
+        self.currentFactor = math.min(self.currentFactor + Time.deltaTime * self.transitionSpeed, 1)
+    else
+        self.currentFactor = math.max(self.currentFactor - Time.deltaTime * self.transitionSpeed, 0)
+    end
+
+    if self.currentFactor > 0 then
+        local velMagnitude = self.vehicle.rigidbody.velocity.magnitude
+        local curveDrag, curveAngularDrag, curvePerpendicularDrag = self:GetCurve(velMagnitude)
+
+        -- Interpolate between default and curve-based values
+        drag = Mathf.Lerp(0.2, curveDrag, self.currentFactor)
+        angularDrag = Mathf.Lerp(2, curveAngularDrag, self.currentFactor)
+        perpendicularDrag = Mathf.Lerp(2, curvePerpendicularDrag, self.currentFactor)
+    end
+
+    self:SetVehicleDrag(drag, angularDrag, perpendicularDrag)
+end
+
+function highGturn:GetCurve(velMagnitude)
+    local DM = self.DMCurve.Evaluate(velMagnitude)
+    local ADM = self.ADMCurve.Evaluate(velMagnitude)
+    local PD = self.PDCurve.Evaluate(velMagnitude)
+    return 0.2 * DM, 2 * ADM, PD
+end
+
+function highGturn:SetVehicleDrag(drag, angularDrag, perpendicularDrag)
+    self.vehicle.rigidbody.drag = drag
+    self.vehicle.rigidbody.angularDrag = angularDrag
+    self.vehicle.perpendicularDrag = perpendicularDrag
+end

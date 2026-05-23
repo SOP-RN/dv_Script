@@ -1,0 +1,110 @@
+behaviour("ReSpecialProjectile")
+
+function ReSpecialProjectile:Start()
+	self.projectile = self.targets.projectile.GetComponent(Projectile)
+
+	self.startTime = Time.time
+	
+	self.dataContainer = self.gameObject.GetComponent(DataContainer)
+	
+	self.inheritVelocity = self.dataContainer.GetBool("InheritVelocity")
+
+	self.timeToReachMaxSpeed = self.dataContainer.GetFloat("TimeToReachMaxSpeed")
+	self.flareDuration = self.dataContainer.GetFloat("FlareDuration")
+	self.minAcceleration = self.dataContainer.GetFloat("MinAcceleration")
+	self.maxAcceleration = self.dataContainer.GetFloat("MaxAcceleration")
+	self.minAngle = self.dataContainer.GetFloat("MinAngle")
+	self.maxAngle = self.dataContainer.GetFloat("MaxAngle")
+	
+	self.accelerationCurve = self.dataContainer.GetAnimationCurve("AccelerationCurve")
+	
+	self.lastTarget = nil
+	self.isReady = true
+	self.hasLastTarget = false
+	self.onceLostTarget = false
+	
+	self.lastDistanceTravelled = 0
+end
+
+function ReSpecialProjectile:Update()
+	if self.projectile ~= nil and self.lastDistanceTravelled ~= self.projectile.distanceTravelled then
+		self.lastDistanceTravelled = self.projectile.distanceTravelled
+		self:ProjectileUpdate()
+	else
+		if not self.onceDestroyScript then
+			self:DestroyScript()
+		end
+	end
+end
+
+function ReSpecialProjectile:StartFlareCoolDown()
+	self.isReady = false
+	coroutine.yield(WaitForSeconds(self.flareDuration))
+	if self:CheckAngleRange() then
+        self.projectile.SetTrackerTarget(self.lastTarget)
+        self.onceLostTarget = true
+		self.isReady = true
+    end
+end
+
+function ReSpecialProjectile:ProjectileUpdate()
+	if not self.isReady then
+        return
+    end
+
+    local currentTime = Time.time - self.startTime
+    local speed = self:EvaluateAcceleration(currentTime)
+    
+    local velocity = Vector3.zero
+
+    if self.projectile.isTrackingTarget or self.onceLostTarget then
+        if not self.hasLastTarget then
+            self.hasLastTarget = true
+            self.lastTarget = self.projectile.currentTarget
+        end
+
+        local target = self.projectile.currentTarget
+        local direction = target.transform.position - self.gameObject.transform.position
+
+        if self.inheritVelocity then
+            velocity = self.projectile.killCredit.velocity + Vector3.Normalize(direction) * speed
+        else
+            velocity = Vector3.Normalize(direction) * speed
+        end
+    else
+        if self.hasLastTarget then
+            self.hasLastTarget = false
+            self.script.StartCoroutine("StartFlareCoolDown")
+        end
+
+        local direction = self.projectile.transform.forward
+        velocity = direction * speed
+    end
+
+    self.projectile.velocity = velocity
+end
+
+function ReSpecialProjectile:EvaluateAcceleration(currentTime)
+    local normalizedTime = Mathf.Clamp01(currentTime / self.timeToReachMaxSpeed)
+    local curveTime = normalizedTime * self.accelerationCurve.length
+
+    local speed = self.accelerationCurve.Evaluate(curveTime)
+
+    speed = Mathf.Lerp(self.minAcceleration, self.maxAcceleration, speed)
+
+    return speed
+end
+
+function ReSpecialProjectile:CheckAngleRange()
+    local target = self.projectile.currentTarget
+    local direction = target.transform.position - self.gameObject.transform.position
+
+    local angle = Vector3.Angle(self.gameObject.transform.forward, direction)
+
+    return angle >= self.minAngle and angle <= self.maxAngle
+end
+
+function ReSpecialProjectile:DestroyScript()
+	self.onceDestroyScript = true
+    GameObject.Destroy(self.script)
+end

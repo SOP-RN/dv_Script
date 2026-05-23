@@ -1,0 +1,26 @@
+behaviour("ReProjectileBox")
+
+function ReProjectileBox:Start()
+	self.projectile = self.targets.Projectile.GetComponent(Projectile)
+	self.destructible = self.targets.Destructible.GetComponent(Destructible)
+	self.activateOnExplosion = self.targets.activateOnExplosion
+	
+	self.destructible.gameObject.SetActive(true)
+	
+	self.isExplode = false
+end
+
+function ReProjectileBox:Update()
+	if self.projectile == nil or self.destructible == nil or self.isExplode then
+		return
+	end
+	
+	if self.activateOnExplosion.gameObject.activeSelf then
+		self.destructible.gameObject.SetActive(false)
+	end
+
+	if self.destructible.isDead then
+		self.isExplode = true
+		self.projectile.Stop(false)
+	end
+end
