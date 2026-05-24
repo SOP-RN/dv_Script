@@ -15,7 +15,6 @@ function GuidedBombVel:Start()
     if self.projectile.killCredit then
         self.projectile.velocity = self.projectile.killCredit.velocity * 1
         local inheritedSpeed = self.projectile.velocity.magnitude
-        print("Inherited Speed: " .. inheritedSpeed .. " m/s")
     end
 end
 
