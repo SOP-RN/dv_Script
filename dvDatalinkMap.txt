@@ -1,0 +1,635 @@
+behaviour("dvDatalinkMap")
+
+-- =================================================
+-- dvDatalinkMap - 数据链地图 / Datalink Track Map
+-- 基于 dvRadar 1/2 逻辑，增加：
+--   1) 航迹带扫描间隔 (每 xx 秒刷新一次)
+--   2) 延迟外推 (dead-reckoning)，机动时滞后，需打提前量
+--   3) 越陈旧越淡，超过 DatalinkFadeTime 消失 (通过 Text.color.a 实现)
+-- 其它：沿用原 radar 的 zoom 策略、分类限数、符号、队伍颜色
+--
+-- DataContainer 需要的字段 (兼容 dvRadar + 新增)：
+-- 必需 (沿用):
+--   RadarEffectDistance  float  最大雷达范围
+--   RadarMinDistance     float  最小缩放范围
+--   RadarZoomSpeed       float  缩放平滑速度
+--   RadarUpdateTime      float  作为 DatalinkScanTime fallback
+--   RadarZoomMode        int    0=默认最大，导弹接近收缩 / 1=默认最小，导弹远离扩张 (可选，默认0)
+--   MaxGroundVehicles    int
+--   MaxBoats             int
+--   MaxFriendlyAir       int
+--   RadarEnemyColor      color
+--   RadarAlliedColor     color
+--   RadarEnemyAirSymbol / RadarFriendlyAirSymbol / etc string (可选，若没有则用默认 C/D/G/H/F)
+--
+-- 新增 (可选，都有 fallback 默认值):
+--   DatalinkScanTime     float  扫描间隔，默认 1.0s (越大越滞后)
+--   DatalinkFadeTime     float  航迹保留时长，超过消失，默认 3.0s
+--   DatalinkExtrapolate  bool   是否外推航迹，默认 true
+--   DatalinkExtraFactor  float  外推系数，1.0=完全按最后速度外推，<1更滞后，默认 1.0
+--   DatalinkMinAlpha     float  最淡时最低透明度再消失，默认 0.0
+--   DatalinkUseScaleFade bool   旧航迹是否同时缩小，默认 false
+--
+-- Targets (和 dvRadar 相同):
+--   vehicle      - Vehicle
+--   screen       - RectTransform 容器的 RectTransform
+--   dataContainer- DataContainer
+--   textPool     - Text[] 池，子物体挂 Text
+-- =================================================
+
+local RadarType = {
+    MISSILE = 1,
+    AIR = 2,
+    GROUND = 3,
+    BOAT = 4
+}
+
+-- ---------- 安全读取 DataContainer 的辅助函数 ----------
+local function SafeCall(dc, fnName, id, def)
+    -- 尝试调用 dc[fnName](id)，失败返回 def
+    local ok, val = pcall(function()
+        return dc[fnName](dc, id)
+    end)
+    if ok then
+        -- 对于数值类型，如果是 Datalink 专用且返回 0/空字符串，认为是未配置，返回 def
+        if val == nil then
+            return def
+        end
+        if type(val) == "number" and val == 0 and def ~= 0 then
+            if string.find(id, "Datalink") ~= nil then
+                return def
+            end
+        end
+        if type(val) == "string" and val == "" and def ~= "" then
+            if string.find(id, "Datalink") ~= nil or string.find(id, "Radar") ~= nil then
+                -- 允许空字符串作为未配置
+                if def ~= "" then
+                    -- 如果是新增的 symbol 配置，空则用默认
+                    return def
+                end
+            end
+        end
+        return val
+    else
+        return def
+    end
+end
+
+function dvDatalinkMap:Start()
+
+    self.vehicle = self.targets.vehicle.GetComponent(Vehicle)
+    self.rtScreen = self.targets.screen.GetComponent(RectTransform)
+    self.dc = self.targets.dataContainer.GetComponent(DataContainer)
+    self.textPool = self.targets.textPool.GetComponentsInChildren(Text)
+
+    ----------------------------------------------------
+    -- 计时
+    ----------------------------------------------------
+    self.scanTimer = 0
+    self.time = 0
+
+    ----------------------------------------------------
+    -- RADAR 基础设置 (兼容 dvRadar)
+    ----------------------------------------------------
+    self.radarMaxRange = SafeCall(self.dc, "GetFloat", "RadarEffectDistance", 2500)
+    self.radarMinRange = SafeCall(self.dc, "GetFloat", "RadarMinDistance", 400)
+    self.radarZoomSpeed = SafeCall(self.dc, "GetFloat", "RadarZoomSpeed", 2.0)
+    self.radarZoomMode = SafeCall(self.dc, "GetInt", "RadarZoomMode", 0)
+
+    self.radarRange = self.radarMaxRange
+
+    ----------------------------------------------------
+    -- DATALINK 新增设置
+    ----------------------------------------------------
+    local fallbackUpdate = SafeCall(self.dc, "GetFloat", "RadarUpdateTime", 1.0)
+    self.scanInterval = SafeCall(self.dc, "GetFloat", "DatalinkScanTime", fallbackUpdate)
+    if self.scanInterval <= 0.05 then self.scanInterval = 0.05 end -- 防止过快
+
+    self.fadeTime = SafeCall(self.dc, "GetFloat", "DatalinkFadeTime", 3.0)
+    if self.fadeTime <= 0.1 then self.fadeTime = 3.0 end
+
+    self.useExtrapolation = SafeCall(self.dc, "GetBool", "DatalinkExtrapolate", true)
+    self.extraFactor = SafeCall(self.dc, "GetFloat", "DatalinkExtraFactor", 1.0)
+    self.minAlpha = SafeCall(self.dc, "GetFloat", "DatalinkMinAlpha", 0.0)
+    self.useScaleFade = SafeCall(self.dc, "GetBool", "DatalinkUseScaleFade", false)
+
+    ----------------------------------------------------
+    -- LIMITS
+    ----------------------------------------------------
+    self.maxGround = SafeCall(self.dc, "GetInt", "MaxGroundVehicles", 6)
+    self.maxBoats = SafeCall(self.dc, "GetInt", "MaxBoats", 3)
+    self.maxFriendlyAir = SafeCall(self.dc, "GetInt", "MaxFriendlyAir", 4)
+
+    ----------------------------------------------------
+    -- COLORS
+    ----------------------------------------------------
+    self.enemyColor = SafeCall(self.dc, "GetColor", "RadarEnemyColor", Color(1, 0.2, 0.2, 1))
+    self.friendlyColor = SafeCall(self.dc, "GetColor", "RadarAlliedColor", Color(0.3, 0.8, 1, 1))
+
+    ----------------------------------------------------
+    -- SYMBOLS (兼容 dvRadar 2 的可配置)
+    ----------------------------------------------------
+    self.enemyAirSymbol = SafeCall(self.dc, "GetString", "RadarEnemyAirSymbol", "C")
+    self.friendlyAirSymbol = SafeCall(self.dc, "GetString", "RadarFriendlyAirSymbol", "D")
+    self.enemyGroundSymbol = SafeCall(self.dc, "GetString", "RadarEnemyGroundSymbol", "G")
+    self.friendlyGroundSymbol = SafeCall(self.dc, "GetString", "RadarFriendlyGroundSymbol", "G")
+    self.enemyBoatSymbol = SafeCall(self.dc, "GetString", "RadarEnemyBoatSymbol", "H")
+    self.friendlyBoatSymbol = SafeCall(self.dc, "GetString", "RadarFriendlyBoatSymbol", "H")
+    self.missileSymbol = SafeCall(self.dc, "GetString", "RadarMissileSymbol", "E")
+
+    ----------------------------------------------------
+    -- TRACK TABLE
+    -- 持久化航迹，不像原 radar 每帧重置
+    -- 每个 track:
+    --  vehicleRef : 原始对象引用 (Vehicle 或 Missile)
+    --  type       : RadarType
+    --  team
+    --  lastPos    : Vector3  最后扫描到的位置
+    --  lastVel    : Vector3  最后扫描到的速度 (用于外推)
+    --  lastSeen   : float  Time.time
+    ----------------------------------------------------
+    self.tracks = {}
+end
+
+----------------------------------------------------
+-- UPDATE
+-- 分两层：扫描层(低频) + 绘制层(每帧)
+----------------------------------------------------
+function dvDatalinkMap:Update()
+
+    if not self.vehicle.playerIsInside then
+        self:ResetPool()
+        self.tracks = {}
+        self.scanTimer = 0
+        return
+    end
+
+    self.scanTimer = self.scanTimer + Time.deltaTime
+
+    if self.scanTimer >= self.scanInterval then
+        self.scanTimer = 0
+        self:UpdateRadarZoom()
+        self:ScanDatalink()
+    end
+
+    -- 每帧都做：剔除过期、排序、绘制 (渐隐需要每帧更新)
+    self:PruneStaleTracks()
+    self:SortTracksByPredictedDistance()
+    self:ResetPool()
+    self:DrawDatalinkTargets()
+end
+
+----------------------------------------------------
+-- RADAR ZOOM (沿用 dvRadar 2 的双模式逻辑)
+----------------------------------------------------
+function dvDatalinkMap:UpdateRadarZoom()
+
+    local missiles = self.vehicle.GetTrackingMissiles()
+    local targetRange = self.radarMaxRange
+
+    -- MODE 0: 默认最大，导弹接近时收缩
+    if self.radarZoomMode == 0 then
+        targetRange = self.radarMaxRange
+        if #missiles > 0 then
+            local nearest = self.radarMaxRange
+            local myPos = self.vehicle.transform.position
+            for i = 1, #missiles do
+                local m = missiles[i]
+                if m ~= nil and m.transform ~= nil then
+                    local dist = Vector3.Distance(myPos, m.transform.position)
+                    if dist < nearest then nearest = dist end
+                end
+            end
+            targetRange = nearest * 1.25
+            targetRange = Mathf.Clamp(targetRange, self.radarMinRange, self.radarMaxRange)
+        end
+
+    -- MODE 1: 默认最小，导弹远离时扩张
+    elseif self.radarZoomMode == 1 then
+        targetRange = self.radarMinRange
+        if #missiles > 0 then
+            local farthest = 0
+            local myPos = self.vehicle.transform.position
+            for i = 1, #missiles do
+                local m = missiles[i]
+                if m ~= nil and m.transform ~= nil then
+                    local dist = Vector3.Distance(myPos, m.transform.position)
+                    if dist > farthest then farthest = dist end
+                end
+            end
+            targetRange = farthest * 1.25
+            targetRange = Mathf.Clamp(targetRange, self.radarMinRange, self.radarMaxRange)
+        end
+    end
+
+    self.radarRange = Mathf.Lerp(self.radarRange, targetRange, Time.deltaTime * self.radarZoomSpeed)
+end
+
+----------------------------------------------------
+-- RESET POOL
+----------------------------------------------------
+function dvDatalinkMap:ResetPool()
+    for i = 1, #self.textPool do
+        local txt = self.textPool[i]
+        txt.rectTransform.localScale = Vector3.zero
+    end
+end
+
+----------------------------------------------------
+-- FIND TRACK INDEX BY VEHICLE REFERENCE
+----------------------------------------------------
+function dvDatalinkMap:FindTrackIndexByRef(ref)
+    for i = 1, #self.tracks do
+        if self.tracks[i].vehicleRef == ref then
+            return i
+        end
+    end
+    return nil
+end
+
+----------------------------------------------------
+-- SCAN DATALINK (低频)
+-- 只更新航迹，不直接绘制
+----------------------------------------------------
+function dvDatalinkMap:ScanDatalink()
+
+    local myPos = self.vehicle.transform.position
+    local now = Time.time
+
+    ------------------------------------------------
+    -- 统计当前存活的各类型数量 (用于限制新目标)
+    ------------------------------------------------
+    local aliveGround = 0
+    local aliveBoat = 0
+    local aliveFriendlyAir = 0
+
+    for i = 1, #self.tracks do
+        local tr = self.tracks[i]
+        local age = now - tr.lastSeen
+        if age < self.fadeTime then
+            if tr.type == RadarType.GROUND then
+                aliveGround = aliveGround + 1
+            elseif tr.type == RadarType.BOAT then
+                aliveBoat = aliveBoat + 1
+            elseif tr.type == RadarType.AIR then
+                if tr.team == self.vehicle.team then
+                    aliveFriendlyAir = aliveFriendlyAir + 1
+                end
+            end
+        end
+    end
+
+    ------------------------------------------------
+    -- 扫描载具
+    ------------------------------------------------
+    local vehicles = ActorManager.VehiclesInRange(myPos, self.radarMaxRange)
+
+    for i = 1, #vehicles do
+        local v = vehicles[i]
+        if v ~= nil and v ~= self.vehicle then
+            if v.hasDriver and not v.isTurret and not v.isDead then
+                local dist = Vector3.Distance(myPos, v.transform.position)
+                local rType = nil
+                local isFriendly = (v.team == self.vehicle.team)
+
+                if v.isAirplane or v.isHelicopter then
+                    rType = RadarType.AIR
+                elseif v.isBoat then
+                    rType = RadarType.BOAT
+                else
+                    rType = RadarType.GROUND
+                end
+
+                -- 检查是否已在航迹中
+                local idx = self:FindTrackIndexByRef(v)
+                if idx ~= nil then
+                    -- 已有航迹，直接刷新
+                    local tr = self.tracks[idx]
+                    tr.lastPos = v.transform.position
+                    -- 速度：优先 rigidbody.velocity
+                    local vel = Vector3.zero
+                    if v.rigidbody ~= nil then
+                        vel = v.rigidbody.velocity
+                    end
+                    tr.lastVel = vel
+                    tr.lastSeen = now
+                    tr.distanceAtScan = dist
+                    tr.team = v.team
+                    tr.type = rType
+                else
+                    -- 新航迹，检查限数
+                    local canAdd = true
+                    if rType == RadarType.GROUND then
+                        if aliveGround >= self.maxGround then canAdd = false end
+                    elseif rType == RadarType.BOAT then
+                        if aliveBoat >= self.maxBoats then canAdd = false end
+                    elseif rType == RadarType.AIR and isFriendly then
+                        if aliveFriendlyAir >= self.maxFriendlyAir then canAdd = false end
+                    end
+
+                    if canAdd then
+                        local vel = Vector3.zero
+                        if v.rigidbody ~= nil then
+                            vel = v.rigidbody.velocity
+                        end
+                        local newTrack = {
+                            vehicleRef = v,
+                            type = rType,
+                            team = v.team,
+                            lastPos = v.transform.position,
+                            lastVel = vel,
+                            lastSeen = now,
+                            distanceAtScan = dist
+                        }
+                        table.insert(self.tracks, newTrack)
+                        -- 更新计数
+                        if rType == RadarType.GROUND then aliveGround = aliveGround + 1
+                        elseif rType == RadarType.BOAT then aliveBoat = aliveBoat + 1
+                        elseif rType == RadarType.AIR and isFriendly then aliveFriendlyAir = aliveFriendlyAir + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    ------------------------------------------------
+    -- 扫描导弹 (跟踪本机的)
+    ------------------------------------------------
+    local missiles = self.vehicle.GetTrackingMissiles()
+    for i = 1, #missiles do
+        local mis = missiles[i]
+        if mis ~= nil and mis.isActive then
+            local dist = 0
+            if mis.transform ~= nil then
+                dist = Vector3.Distance(myPos, mis.transform.position)
+            end
+            local idx = self:FindTrackIndexByRef(mis)
+            if idx ~= nil then
+                local tr = self.tracks[idx]
+                if mis.transform ~= nil then
+                    tr.lastPos = mis.transform.position
+                end
+                -- 导弹速度直接来自 projectile.velocity
+                tr.lastVel = mis.velocity
+                tr.lastSeen = now
+                tr.distanceAtScan = dist
+                tr.team = -1 -- 敌方
+            else
+                local pos = Vector3.zero
+                if mis.transform ~= nil then
+                    pos = mis.transform.position
+                end
+                local newTrack = {
+                    vehicleRef = mis,
+                    type = RadarType.MISSILE,
+                    team = -1,
+                    lastPos = pos,
+                    lastVel = mis.velocity,
+                    lastSeen = now,
+                    distanceAtScan = dist
+                }
+                table.insert(self.tracks, newTrack)
+            end
+        end
+    end
+end
+
+----------------------------------------------------
+-- PRUNE STALE (超过 fadeTime 消失，死亡/失效也消失)
+----------------------------------------------------
+function dvDatalinkMap:PruneStaleTracks()
+    local now = Time.time
+    local i = 1
+    while i <= #self.tracks do
+        local tr = self.tracks[i]
+        local age = now - tr.lastSeen
+        local shouldRemove = false
+
+        if age > self.fadeTime then
+            shouldRemove = true
+        else
+            -- 载具死亡则立即加速淡出? 这里选择立即移除过期更快
+            -- 但保留 fade 逻辑：死亡的载具允许继续淡出直到 fadeTime，不立即移除，除非 isDead 且 age > scanInterval
+            -- 导弹失效直接移除
+            if tr.type == RadarType.MISSILE then
+                local mis = tr.vehicleRef
+                if mis == nil or not mis.isActive then
+                    -- 导弹失效后仍保留 fadeTime 一段时间再消失，保持一致性
+                    -- 如果想立即消失，取消注释下一行
+                    -- shouldRemove = age > 0.1
+                    if age > self.fadeTime then
+                        shouldRemove = true
+                    end
+                end
+            else
+                local veh = tr.vehicleRef
+                if veh == nil or veh.isDead then
+                    -- 死亡目标在 fadeTime 后消失，如果需要立即消失可缩短
+                    if age > self.fadeTime then
+                        shouldRemove = true
+                    end
+                end
+            end
+        end
+
+        if shouldRemove then
+            table.remove(self.tracks, i)
+        else
+            i = i + 1
+        end
+    end
+end
+
+----------------------------------------------------
+-- 外推位置 (dead reckoning)
+-- 返回预测位置，用于绘制
+----------------------------------------------------
+function dvDatalinkMap:GetExtrapolatedPos(track)
+    if not self.useExtrapolation then
+        return track.lastPos
+    end
+
+    local age = Time.time - track.lastSeen
+
+    -- 只外推水平速度，垂直忽略 (和原 radar 的 delta.y=0 保持一致)
+    -- 如果需要 3D 外推，可直接用 track.lastVel * age
+    local vel = track.lastVel
+    -- 将 y 分量置零，避免高度跳动影响雷达平面
+    local flatVel = Vector3(vel.x, 0, vel.z)
+
+    -- extraFactor 控制滞后程度：
+    -- 1.0 = 完全按旧速度外推，最接近真实但仍有滞后
+    -- 0.5 = 外推一半，滞后更明显
+    -- 0.0 = 完全不外推，冻结在最后位置，滞后最大
+    local predicted = track.lastPos + flatVel * age * self.extraFactor
+
+    return predicted
+end
+
+----------------------------------------------------
+-- 按预测距离排序 (近的优先显示，池不够时远的丢弃)
+----------------------------------------------------
+function dvDatalinkMap:SortTracksByPredictedDistance()
+    local myPos = self.vehicle.transform.position
+    table.sort(self.tracks, function(a, b)
+        local pa = self:GetExtrapolatedPos(a)
+        local pb = self:GetExtrapolatedPos(b)
+        local da = Vector3.Distance(myPos, pa)
+        local db = Vector3.Distance(myPos, pb)
+        return da < db
+    end)
+end
+
+----------------------------------------------------
+-- DRAW
+----------------------------------------------------
+function dvDatalinkMap:DrawDatalinkTargets()
+
+    local poolIndex = 1
+
+    for i = 1, #self.tracks do
+        if poolIndex > #self.textPool then
+            return
+        end
+
+        local track = self.tracks[i]
+        local txt = self.textPool[poolIndex]
+
+        self:DrawSingleDatalink(txt, track)
+
+        poolIndex = poolIndex + 1
+    end
+end
+
+----------------------------------------------------
+-- DRAW SINGLE (核心渐隐逻辑)
+----------------------------------------------------
+function dvDatalinkMap:DrawSingleDatalink(txt, track)
+
+    local myPos = self.vehicle.transform.position
+    local predictedPos = self:GetExtrapolatedPos(track)
+
+    ------------------------------------------------
+    -- FLAT DELTA (与原 radar 一致)
+    ------------------------------------------------
+    local delta = predictedPos - myPos
+    delta.y = 0
+
+    ------------------------------------------------
+    -- STABLE RADAR AXIS (yaw only)
+    ------------------------------------------------
+    local yawForward = Vector3(
+        self.vehicle.transform.forward.x,
+        0,
+        self.vehicle.transform.forward.z
+    ).normalized
+
+    local yawRight = Vector3(
+        yawForward.z,
+        0,
+        -yawForward.x
+    )
+
+    ------------------------------------------------
+    -- RADAR SPACE
+    ------------------------------------------------
+    local radarX = Vector3.Dot(delta, yawRight)
+    local radarY = Vector3.Dot(delta, yawForward)
+
+    radarX = radarX / self.radarRange
+    radarY = radarY / self.radarRange
+
+    ------------------------------------------------
+    -- EDGE CLAMP (超出圈边缘固定在边缘)
+    ------------------------------------------------
+    local magnitude = Mathf.Sqrt(radarX * radarX + radarY * radarY)
+    if magnitude > 1 then
+        radarX = radarX / magnitude
+        radarY = radarY / magnitude
+    end
+
+    ------------------------------------------------
+    -- UI POSITION
+    ------------------------------------------------
+    local screenX = radarX * self.rtScreen.sizeDelta.x * 0.5
+    local screenY = radarY * self.rtScreen.sizeDelta.y * 0.5
+
+    txt.rectTransform.localPosition = Vector3(screenX, screenY, 0)
+
+    ------------------------------------------------
+    -- ALPHA FADE (越旧越淡，3秒消失)
+    ------------------------------------------------
+    local age = Time.time - track.lastSeen
+    local ageNorm = age / self.fadeTime
+    ageNorm = Mathf.Clamp01(ageNorm)
+
+    -- 透明度曲线：线性或二次方 (二次方更早变淡，更像雷达余晖)
+    -- 这里用线性 Lerp，也可改成 1 - ageNorm^2
+    local alpha = 1.0 - ageNorm
+    -- 二次淡出更自然 (可选)
+    -- alpha = alpha * alpha
+    alpha = Mathf.Clamp(alpha, self.minAlpha, 1.0)
+
+    -- 如果超过 fadeTime，alpha=0，前面 Prune 会删，但这里二次保险
+    if ageNorm >= 1.0 then
+        txt.rectTransform.localScale = Vector3.zero
+        return
+    end
+
+    ------------------------------------------------
+    -- COLOR & SYMBOL
+    ------------------------------------------------
+    local baseColor = self.enemyColor
+    local symbol = "?"
+
+    if track.type == RadarType.MISSILE then
+        baseColor = self.enemyColor
+        symbol = self.missileSymbol
+        -- 导弹朝向：用预测方向的角度
+        local ang = math.atan2(radarY, radarX) * Mathf.Rad2Deg
+        txt.rectTransform.localRotation = Quaternion.Euler(0, 0, ang - 90)
+    elseif track.type == RadarType.AIR then
+        if track.team == self.vehicle.team then
+            baseColor = self.friendlyColor
+            symbol = self.friendlyAirSymbol
+        else
+            baseColor = self.enemyColor
+            symbol = self.enemyAirSymbol
+        end
+        txt.rectTransform.localRotation = Quaternion.identity
+    elseif track.type == RadarType.GROUND then
+        if track.team == self.vehicle.team then
+            baseColor = self.friendlyColor
+            symbol = self.friendlyGroundSymbol
+        else
+            baseColor = self.enemyColor
+            symbol = self.enemyGroundSymbol
+        end
+        txt.rectTransform.localRotation = Quaternion.identity
+    elseif track.type == RadarType.BOAT then
+        if track.team == self.vehicle.team then
+            baseColor = self.friendlyColor
+            symbol = self.friendlyBoatSymbol
+        else
+            baseColor = self.enemyColor
+            symbol = self.enemyBoatSymbol
+        end
+        txt.rectTransform.localRotation = Quaternion.identity
+    end
+
+    -- 应用 alpha 到颜色
+    -- 注意：Color 的 a 通道在 Ravenscript 中可直接构造
+    txt.color = Color(baseColor.r, baseColor.g, baseColor.b, baseColor.a * alpha)
+    txt.text = symbol
+
+    ------------------------------------------------
+    -- SCALE (可选：旧航迹缩小)
+    ------------------------------------------------
+    if self.useScaleFade then
+        local scaleFactor = Mathf.Lerp(1.0, 0.6, ageNorm)
+        txt.rectTransform.localScale = Vector3(scaleFactor, scaleFactor, scaleFactor)
+    else
+        txt.rectTransform.localScale = Vector3.one
+    end
+end
